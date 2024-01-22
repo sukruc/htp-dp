@@ -12,7 +12,7 @@ from IPython.display import Markdown, Latex
 import matplotlib.lines as mlines
 from typing import Dict, Any, Union, TypeVar, Callable
 from sklearn import covariance
-
+import pickle
 
 class ArbitraryStratifiedKFold(model_selection.StratifiedKFold):
     def __init__(self, n_splits=5, *, shuffle=False, random_state=None):
@@ -122,6 +122,8 @@ def standardizePred(y_pred: Union[pd.DataFrame, np.ndarray, pd.Series]):
         raise TypeError("y_pred must be a pandas DataFrame, Series or numpy array.")
     return y_pred
 
+def wape(y_true, y_pred):
+    return metrics.mean_absolute_percentage_error(y_true, y_pred, sample_weight=y_true)
 
 def renameH(df):
     df = df.copy()
@@ -174,7 +176,7 @@ SCORING={
     "MAE": metrics.make_scorer(metrics.mean_absolute_error, greater_is_better=False),
     "MAPE": metrics.make_scorer(metrics.mean_absolute_percentage_error, greater_is_better=False),
     "Bias%": metrics.make_scorer(bias, greater_is_better=False),
-    "WAPE%": metrics.make_scorer(lambda x, y: metrics.mean_absolute_percentage_error(x, y, sample_weight=y), greater_is_better=False),
+    "WAPE%": metrics.make_scorer(wape, greater_is_better=False),
     "Pearson-R": metrics.make_scorer(pearson)
 }
 
@@ -203,9 +205,9 @@ class Dataset:
         self.clusterer: pipeline.Pipeline = None
         self.clusters: pd.Series = None
         self.scores: Dict[str, Any] = None
-        self.models: Dict[str, pipeline.Pipeline] = {}
+        self.models: Dict[str, model_selection.GridSearchCV] = {}
         self.models_cv: Dict[str, Dict[Any, Any]] = {}
-        self.renameFunc = lambda x: x
+        self.renameFunc = identity
         self.y_pred: Dict[str, Prediction] = {}
         self.y_pred_train: Dict[str, Prediction] = {}
         self.y_pred_test: Dict[str, Prediction] = {}
@@ -218,6 +220,16 @@ class Dataset:
     def setClusterer(self, clusterer):
         self.clusterer = clusterer
         return self
+    
+    def to_pickle(self, path):
+        with open(path, 'wb') as f:
+            pickle.dump(self, f)
+        return self
+    
+    @classmethod
+    def from_pickle(cls, path):
+        with open(path, 'rb') as f:
+            return pickle.load(f)
     
     def decompose(self):
         self.Xdec = self.decpipeline.fit_transform(self.X, self.y)
@@ -265,10 +277,6 @@ class Dataset:
 
         sns.displot(data, x=NAME_KEYS[target_var], hue='Tube type', kind='kde', fill=True)
 
-
-            
-
-
     def defineCats(self):
         self.sample_category = self.data['dataset'] + " c:" + pd.Series(self.clusters, index=self.data.index).astype(str)
         self.cats = self.data_train['dataset'] + "_" + pd.Series(self.c_train, index=self.data_train.index).map({0: 'A', 1: 'B', 2: 'C'}).astype('category').cat.codes.astype(str)
@@ -296,10 +304,11 @@ class Dataset:
             self.col_names = col_names
         return self
 
-    def addModel(self, model: pipeline.Pipeline, name: str, scoring: Dict[str, Any] = None):
+    def addModel(self, model: model_selection.GridSearchCV, name: str, scoring: Dict[str, Any] = None):
         scoring = scoring or self.scoring
-        self.models_cv[name] = self.getCv(model, scoring)
+        # self.models_cv[name] = self.getCv(model, scoring)
         self.models[name] = model.fit(self.X_train, self.y_train)
+        self.models_cv[name] = self.models[name].cv_results_
         self.y_pred[name] = pd.Series(standardizePred(self.models[name].predict(self.X_test)), index=self.y_test.index, name="Prediction")
         self.y_pred_train[name] = pd.Series(standardizePred(self.models[name].predict(self.X_train)), index=self.y_train.index, name="Prediction")
         return self
@@ -501,6 +510,9 @@ class OutlierDataset(Dataset):
 
 
 
+def getRaw(x):
+    return x['Input Raw']
+
 def getANN():
     olcekli_ann = compose.TransformedTargetRegressor(
         regressor=neural_network.MLPRegressor(hidden_layer_sizes=(40, 10), max_iter=4000, random_state=42),
@@ -516,7 +528,7 @@ def getANN():
 
 
     pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(lambda x: x['Input Raw'])),
+        ("subselect", preprocessing.FunctionTransformer(getRaw)),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ("rescale", preprocessing.StandardScaler()),
         ('mlp', olcekli_ann)
@@ -532,9 +544,12 @@ def getANN():
                 ],
             'mlp__regressor__activation': [
                 'relu',
-                'logistic'
+                'logistic',
+                'tanh'
             ],
             'mlp__regressor__tol': [1e-5],
+            'mlp__regressor__alpha': [0.0001, 1e-2],
+            'mlp__regressor__solver': ['adam', 'lbfgs', 'sgd'], 
         },
         cv=model_selection.KFold(n_splits=3, shuffle=True, random_state=42),
         scoring=scoring,
@@ -545,12 +560,15 @@ def getANN():
     )
     return gs
 
+def identity(x):
+    return x
+
 def getLwr():
     ctlocal = compose.TransformedTargetRegressor(regressor=LocallyWeightedRegressor(n_neighbors=15, gamma=.1), 
                                                 # func=np.log1p, 
-                                                func=lambda x: x, 
+                                                func=identity, 
                                                 #  inverse_func=np.expm1
-                                                inverse_func=lambda x: x
+                                                inverse_func=identity
                                                 )
 
     union = pipeline.FeatureUnion([
@@ -559,7 +577,7 @@ def getLwr():
 
 
     local_pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(lambda x: x['Input Raw'])),
+        ("subselect", preprocessing.FunctionTransformer(getRaw)),
         # ("comp", comp),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
@@ -571,11 +589,13 @@ def getLwr():
     param_grid={
         'mlp__regressor__n_neighbors': [5, 10, 15, 20],
 #         'mlp__regressor__n_neighbors': [1],
-        'mlp__regressor__gamma': [.7, 1, 2, 3]
+        'mlp__regressor__gamma': [.7, 1, 2, 3],
+
     },
     scoring=scoring,
     refit='R2',
     cv=3,
+    n_jobs=-1,
 )
     return local_pipe_gs
 
@@ -587,13 +607,15 @@ def getGBM():
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
         ("rescale", preprocessing.StandardScaler()),
-        ('mlp', compose.TransformedTargetRegressor(regressor=lgb.LGBMRegressor(), func=lambda x : x, inverse_func=lambda x: x))
+        ('mlp', compose.TransformedTargetRegressor(regressor=lgb.LGBMRegressor(), func=identity, inverse_func=identity))
     ])
 
     lgbm_pipe_gs = model_selection.GridSearchCV(
         estimator=lgbm_pipe,
         param_grid={
             'mlp__regressor__reg_alpha': [0, 0.1, 0.5, 1, 2, 3, 4, 5, 10],
+            'mlp__regressor__reg_lambda': [0, 0.1, 0.5, 1, 2, 3, 4, 5, 10],
+            'mlp__regressor__num_leaves': [2, 4, 8, 16, 32, 64, 128, 256, 512],
         },
         scoring=scoring,
         refit='R2',
@@ -607,7 +629,7 @@ def getDummy():
     dummy_pipe = pipeline.Pipeline([
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ("rescale", preprocessing.StandardScaler()),
-        ('mlp', compose.TransformedTargetRegressor(regressor=linear_model.LinearRegression(), func=lambda x : x, inverse_func=lambda x: x))
+        ('mlp', compose.TransformedTargetRegressor(regressor=linear_model.LinearRegression(), func=identity, inverse_func=identity))
     ])
 
     dummy_pipe_gs = model_selection.GridSearchCV(
