@@ -1,2 +1,6 @@
-notebook/Heat Transfer Writeup.docx
+*.docx
 *__pycache__*
+.spyproject
+.conda
+.vscode
+*ipynb_checkpoints*
