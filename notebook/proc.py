@@ -18,9 +18,15 @@ sklearnex.patch_sklearn()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+ENABLE_HTP = True
+ENABLE_DP = True
+ENABLE_EXTRA_HTP = True
+ENABLE_EXTRA_DP = True
+
 
 if __name__ == "__main__":
 
+    # %% Data Processing
     then = time.time()
     logger = logging.getLogger(__name__)
     logger.info("Process started.")
@@ -53,7 +59,7 @@ if __name__ == "__main__":
     Xdp = data_dp.loc[:, idx[[cfg.INPUT_RAW_LAYER_NAME, cfg.INPUT_CALCULATED_LAYER_NAME], :]]
     ydp = data_dp[cfg.OUTPUT_MULTIINDEX_NAME[0]]
 
-
+    # %% Create samples
     h_sample = data_h.T.drop(cfg.OUTPUT_MULTIINDEX_NAME).reset_index(drop=True).rename(
         index=cfg.DATA_H_INDEX_MAP,
     ).T.assign(y=yh).rename(columns={'y': cfg.TARGET_H}).sample(5).head()
@@ -69,132 +75,148 @@ if __name__ == "__main__":
     ).T.assign(y=ydp).rename(columns={'y': cfg.TARGET_DP}).sample(5).head()
     print(dp_sample)
 
+    #%% Define CV and models config
     cv = u.ArbitraryStratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    logger.info("Conducting hTP experiments...")
-    htp = u.Dataset(data=data_h, X=Xh, y=yh)
-    htp.setRenameFunc(u.renameH)
-    htp.setColNames(u.H_NAMES)
-    htp.setDec(u.getDecPipeline())
-    logger.info("Performing decomposition...")
-    htp.decompose()
-    htp.setClusterer(u.getClusterer())
-    logger.info("Performing clustering...")
-    htp.setCategories()
-    logger.info("Performing train-test split...")
-    htp.split(random_state=42, test_size=0.2)
-    htp.defineCats()
-    htp.setScoring(u.SCORING)
-    logger.info("Training models...")
+    model_fn_mapping = [
+        u.ModelConfig(model_name='ANN Raw', model_feature_subset=u.getRaw, model_getter=u.getANNRandomSearch, cv_config=None),
+        u.ModelConfig(model_name='ANN Calc', model_feature_subset=u.getProcessed, model_getter=u.getANNRandomSearch, cv_config=None),
+        u.ModelConfig(model_name='ANN Raw sCV', model_feature_subset=u.getRaw, model_getter=u.getANNRandomSearch, cv_config=cv),
+        u.ModelConfig(model_name='ANN Calc sCV', model_feature_subset=u.getProcessed, model_getter=u.getANNRandomSearch, cv_config=cv),
+        u.ModelConfig(model_name='LWR Raw', model_feature_subset=u.getRaw, model_getter=u.getLwrExtendedNeighbors, cv_config=None),
+        u.ModelConfig(model_name='LWR Calc', model_feature_subset=u.getProcessed, model_getter=u.getLwrExtendedNeighbors, cv_config=None),
+        u.ModelConfig(model_name='LWR Raw sCV', model_feature_subset=u.getRaw, model_getter=u.getLwrExtendedNeighbors, cv_config=cv),
+        u.ModelConfig(model_name='LWR Calc sCV', model_feature_subset=u.getProcessed, model_getter=u.getLwrExtendedNeighbors, cv_config=cv),
+        u.ModelConfig(model_name='GBM Raw', model_feature_subset=u.getRaw, model_getter=u.getGBMFocused),
+        u.ModelConfig(model_name='GBM Calc', model_feature_subset=u.getProcessed, model_getter=u.getGBMFocused),
+        u.ModelConfig(model_name='GBM Raw sCV', model_feature_subset=u.getRaw, model_getter=u.getGBMFocused, cv_config=cv),
+        u.ModelConfig(model_name='GBM Calc sCV', model_feature_subset=u.getProcessed, model_getter=u.getGBMFocused, cv_config=cv),
+    ]
 
-    logger.info("ANN")
-    htp.addModel(u.getANNRandomSearch(cv=cv), 'ANN')
-
-    logger.info("LWR")
-    htp.addModel(u.getLwr(cv=cv), 'LWR')
-
-    logger.info("GBM")
-    htp.addModel(u.getGBM(cv=cv), 'GBM')
-
-    logger.info("Processing results...")
-    for m in htp.models_cv:
-        print(m)
-        _ = u.process_ann_results(htp.models_cv[m], m)[0]
-        _.to_csv("../output/htp_normal_{}.csv".format(m), index=True)
-
-    logger.info("Conducting dpTP experiments...")
-    dp = u.Dataset(data=data_dp, X=Xdp, y=ydp)
-    dp.setRenameFunc(u.renameDP)
-    dp.setColNames(u.DP_NAMES)
-    dp.setDec(u.getDecPipeline())
-    logger.info("Performing decomposition...")
-    dp.decompose()
-    dp.setClusterer(u.getClusterer())
-    logger.info("Performing clustering...")
-    dp.setCategories()
-    logger.info("Performing train-test split...")
-    dp.split(random_state=42, test_size=0.2)
-    dp.defineCats()
-    dp.setScoring(u.SCORING)
-
-    logger.info("Training models...")
-    logger.info("ANN")
-    dp.addModel(u.getANN(cv=cv), 'ANN')
-
-    logger.info("LWR")
-    dp.addModel(u.getLwr(cv=cv), 'LWR')
-
-    logger.info("GBM")
-    dp.addModel(u.getGBM(cv=cv), 'GBM')
+    #%% Conduct HTP
+    if ENABLE_HTP:
+        logger.info("Conducting hTP experiments...")
+        htp = u.Dataset(data=data_h, X=Xh, y=yh)
+        htp.setRenameFunc(u.renameH)
+        htp.setColNames(u.H_NAMES)
+        htp.setDec(u.getDecPipeline())
+        logger.info("Performing decomposition...")
+        htp.decompose()
+        htp.setClusterer(u.getClusterer())
+        logger.info("Performing clustering...")
+        htp.setCategories()
+        logger.info("Performing train-test split...")
+        htp.split(random_state=42, test_size=0.2)
+        htp.defineCats()
+        htp.setScoring(u.SCORING)
 
 
-    logger.info("Processing results...")
-    for m in dp.models_cv:
-        _ = u.process_ann_results(dp.models_cv[m], m)[0]
-        _.to_csv("../output/dp_normal_{}.csv".format(m), index=True)
 
+        logger.info("Training models...")
+        for mc_obj in model_fn_mapping:
+            logger.info(mc_obj.model_name)
+            htp.addModel(mc_obj.model_getter(cv=mc_obj.cv_config, subselector_fn=mc_obj.model_feature_subset), mc_obj.model_name)
 
-    logger.info("Conducting hTP experiments with outliers...")
-    extra_htp = u.OutlierDataset(data=data_h, X=Xh, y=yh)
-    extra_htp.setRenameFunc(u.renameH)
-    extra_htp.setColNames(u.H_NAMES)
-    extra_htp.setDec(u.getDecPipeline())
-    extra_htp.decompose()
-    extra_htp.setClusterer(u.getClusterer())
-    extra_htp.setCategories()
-    extra_htp.split()
-    extra_htp.setScoring(u.SCORING)
-
-    logger.info("Training models...")
-    logger.info("ANN")
-    extra_htp.addModel(u.getANN(), 'ANN')
-    logger.info("LWR")
-    extra_htp.addModel(u.getLwr(), 'LWR')
-    logger.info("GBM")
-    extra_htp.addModel(u.getGBM(), 'GBM')
-
-    logger.info("Processing results...")
-    for m in extra_htp.models_cv:
-        _ = u.process_ann_results(extra_htp.models_cv[m], m)[0]
-        _.to_csv("../output/htp_outliers_{}.csv".format(m), index=True)
-
-    logger.info("Conducting dp experiments with outliers...")
-    extra_dp = u.OutlierDataset(data=data_dp, X=Xdp, y=ydp)
-    extra_dp.setRenameFunc(u.renameDP)
-    extra_dp.setColNames(u.DP_NAMES)
-    extra_dp.setDec(u.getDecPipeline())
-    logger.info("Performing decomposition...")
-    extra_dp.decompose()
-    extra_dp.setClusterer(u.getClusterer())
-    logger.info("Performing clustering...")
-    extra_dp.setCategories()
-    logger.info("Performing train-test split...")
-    extra_dp.split()
-    extra_dp.setScoring(u.SCORING)
-
-    logger.info("Training models...")
-    logger.info("ANN")
-    extra_dp.addModel(u.getANN(), 'ANN')
-    logger.info("LWR")
-    extra_dp.addModel(u.getLwr(), 'LWR')
-    logger.info("GBM")
-    extra_dp.addModel(u.getGBM(), 'GBM')
-
-    logger.info("Processing results...")
-    for m in extra_dp.models_cv:
-        _ = u.process_ann_results(extra_dp.models_cv[m], m)[0]
-        _.to_csv("../output/dp_outliers_{}.csv".format(m), index=True)
-
-    logger.info("Saving data...")
-    try:
+        logger.info("Processing results...")
+        for m in htp.models_cv:
+            print(m)
+            _ = u.process_ann_results(htp.models_cv[m], m)[0]
+            _.to_csv("../output/htp_normal_{}.csv".format(m), index=True)
         htp.to_pickle("../output/htp.pkl")
         logger.info("htp saved")
+
+    #%% Conduct DP
+    if ENABLE_DP:
+        logger.info("Conducting dpTP experiments...")
+        dp = u.Dataset(data=data_dp, X=Xdp, y=ydp)
+        dp.setRenameFunc(u.renameDP)
+        dp.setColNames(u.DP_NAMES)
+        dp.setDec(u.getDecPipeline())
+        logger.info("Performing decomposition...")
+        dp.decompose()
+        dp.setClusterer(u.getClusterer())
+        logger.info("Performing clustering...")
+        dp.setCategories()
+        logger.info("Performing train-test split...")
+        dp.split(random_state=42, test_size=0.2)
+        dp.defineCats()
+        dp.setScoring(u.SCORING)
+
+        logger.info("Training models...")
+
+        for mc_obj in model_fn_mapping:
+            logger.info(mc_obj.model_name)
+            dp.addModel(mc_obj.model_getter(cv=mc_obj.cv_config, subselector_fn=mc_obj.model_feature_subset), mc_obj.model_name)
+
+        logger.info("Processing results...")
+        for m in dp.models_cv:
+            _ = u.process_ann_results(dp.models_cv[m], m)[0]
+            _.to_csv("../output/dp_normal_{}.csv".format(m), index=True)
         dp.to_pickle("../output/dp.pkl")
         logger.info("dp saved")
+
+    #%% Conduct HTP outliers
+    if ENABLE_EXTRA_HTP:
+        logger.info("Conducting hTP experiments with outliers...")
+        extra_htp = u.OutlierDataset(data=data_h, X=Xh, y=yh)
+        extra_htp.setRenameFunc(u.renameH)
+        extra_htp.setColNames(u.H_NAMES)
+        extra_htp.setDec(u.getDecPipeline())
+        extra_htp.decompose()
+        extra_htp.setClusterer(u.getClusterer())
+        extra_htp.setCategories()
+        extra_htp.split()
+        extra_htp.setScoring(u.SCORING)
+
+        logger.info("Training models...")
+        for mc_obj in model_fn_mapping:
+            if mc_obj.cv_config is not None:
+                continue
+            logger.info(mc_obj.model_name)
+            extra_htp.addModel(mc_obj.model_getter(subselector_fn=mc_obj.model_feature_subset), mc_obj.model_name)
+
+        logger.info("Processing results...")
+        for m in extra_htp.models_cv:
+            _ = u.process_ann_results(extra_htp.models_cv[m], m)[0]
+            _.to_csv("../output/htp_outliers_{}.csv".format(m), index=True)
         extra_htp.to_pickle("../output/extra_htp.pkl")
         logger.info("extra_htp saved")
+
+    # %% Conduct DP outliers
+    if ENABLE_EXTRA_DP:
+        logger.info("Conducting dp experiments with outliers...")
+        extra_dp = u.OutlierDataset(data=data_dp, X=Xdp, y=ydp)
+        extra_dp.setRenameFunc(u.renameDP)
+        extra_dp.setColNames(u.DP_NAMES)
+        extra_dp.setDec(u.getDecPipeline())
+        logger.info("Performing decomposition...")
+        extra_dp.decompose()
+        extra_dp.setClusterer(u.getClusterer())
+        logger.info("Performing clustering...")
+        extra_dp.setCategories()
+        logger.info("Performing train-test split...")
+        extra_dp.split()
+        extra_dp.setScoring(u.SCORING)
+
+
+        logger.info("Training models...")
+        for mc_obj in model_fn_mapping:
+            if mc_obj.cv_config is not None:
+                continue
+            logger.info(mc_obj.model_name)
+            extra_dp.addModel(mc_obj.model_getter(subselector_fn=mc_obj.model_feature_subset), mc_obj.model_name)
+
+        logger.info("Processing results...")
+        for m in extra_dp.models_cv:
+            _ = u.process_ann_results(extra_dp.models_cv[m], m)[0]
+            _.to_csv("../output/dp_outliers_{}.csv".format(m), index=True)
         extra_dp.to_pickle("../output/extra_dp.pkl")
         logger.info("extra_dp saved")
+
+    # %% Save artifacts
+    logger.info("Saving data...")
+    try:
+        pass
     except Exception as e:
         logger.error("Error saving data")
         # Print exception with traceback
