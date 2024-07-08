@@ -5,3 +5,5 @@
 .vscode
 *ipynb_checkpoints*
 ref
+output/*.csv
+.virtual_documents
