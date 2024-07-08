@@ -1,6 +1,6 @@
 from IPython.display import display, HTML
 display(HTML("<style>.container { width:100% !important; }</style>"))
-from sklearn import preprocessing, compose, pipeline, model_selection, neural_network, metrics, tree, ensemble, decomposition, cluster, impute, linear_model, neighbors, mixture, feature_selection
+from sklearn import base, preprocessing, compose, pipeline, model_selection, neural_network, metrics, tree, ensemble, decomposition, cluster, impute, linear_model, neighbors, mixture, feature_selection
 # from sklearn.experimental import enable_halving_search_cv
 import lightgbm as lgb
 import numpy as np
@@ -16,6 +16,7 @@ from sklearn import covariance
 import pickle
 import conf as cfg
 import scipy.stats as scs
+import dataclasses
 
 idx = pd.IndexSlice
 
@@ -82,18 +83,26 @@ def renameScores(x):
     return x.replace("test_", "Test ").replace("train_", "Train ")
 
 
+def maybeWithTubeType(s, check_types=(" h", " dp")):
+    for t in check_types:
+        if s.endswith(t):
+            return s.rstrip(t)
+    return s
+        
+
 NAME_KEYS = {
-    "Mass flux": "$G$",
-    "Saturation pressure": "$P_{sat}$",
-    "Heat flux": "$q$",
-    "Quality": "$x$",
-    "Pressure drop": "$\Delta P_{sat}$",
-    "Reynolds number": "$Re_{t}$",
+    "Mass flux": "$G\ (kg/m^2s)$",
+    "Pressure drop": "$\Delta P\ (Pa)$",
+    "Reynolds number": "$Re_{l}$",
     "Two-phase multiplier": "$X_{tt}$",
     "Froude number": "$Fr_{l}$",
     "Weber number": "$We_{L}$",
     "Bond number": "$Bo$",
-    "Heat transfer coefficient": "$h_{TP}$"
+    "Heat transfer coefficient": "$h_{TP}\ (W/m^2K)$",
+    "Mass flux": "$G\ (kg/m^2s)$",
+    "Saturation pressure": "$P_{sat}\ (Pa)$",
+    "Heat flux": "$q\ (W/m^2)$",
+    "Quality": "$x$",
 }
 
 H_NAMES = pd.Series({
@@ -148,20 +157,24 @@ def standardizePred(y_pred: Union[pd.DataFrame, np.ndarray, pd.Series]):
 def wape(y_true, y_pred):
     return metrics.mean_absolute_percentage_error(y_true, y_pred, sample_weight=y_true)
 
-def renameH(df, X_only=False):
+def renameH(df, X_only=False, names=None):
+    if names is None:
+        names = H_NAMES
     df = df.copy()
     if X_only:
-        df.columns = H_NAMES.drop([10, 11])
+        df.columns = names.drop([10, 11])
         return df
-    df.columns = H_NAMES
+    df.columns = names
     return df
 
-def renameDP(df, X_only=False):
+def renameDP(df, X_only=False, names=None):
+    if names is None:
+        names = DP_NAMES
     df = df.copy()
     if X_only:
-        df.columns = DP_NAMES.drop([10, 11])
+        df.columns = names.drop([10, 11])
         return df
-    df.columns = DP_NAMES
+    df.columns = names
     return df
 
 def getDecPipeline():
@@ -242,6 +255,14 @@ class Dataset:
         self.y_pred_test: Dict[str, Prediction] = {}
         self.scoring: Dict[str, Any] = {}
         
+    def getSubset(self, droplevel1: str):
+        new_obj = self.__class__(self.data.drop(droplevel1, axis=1), self.X.drop(droplevel1, axis=1), self.y)
+        new_names = pd.Series(self.col_names.values, index=self.data.columns)
+        new_names = new_names.drop(droplevel1)
+        new_obj.setRenameFunc(self.renameFunc)
+        new_obj.setColNames(new_names)
+        return new_obj
+
     def setDec(self, decpipeline):
         self.decpipeline = decpipeline
         return self
@@ -278,6 +299,7 @@ class Dataset:
         data = self.data.groupby('dataset').agg(['mean']).T \
             .assign(Deviation=lambda x: x.diff(axis=1).iloc[:,1].abs() / x.iloc[:,1]) \
             .assign(Variable=self.col_names.drop(11).tolist())
+        data = data.rename(lambda x: maybeWithTubeType(x), axis=1)
         
         if stylized:
             return data.style.background_gradient(subset=['Deviation'], cmap='Reds') \
@@ -294,25 +316,49 @@ class Dataset:
         else:
             return data
         
+    def copy(self):
+        new_obj = self.__class__(self.data.copy(), self.X.copy(), self.y.copy())
+        new_obj.setColNames(self.col_names, copy=True)
+        new_obj.setRenameFunc(self.renameFunc)
+        new_obj.setDec(base.clone(self.decpipeline))
+        new_obj.decompose()
+        new_obj.setClusterer(base.clone(self.clusterer))
+        new_obj.setCategories()
+        new_obj.split()
+        new_obj.defineCats()
+        return new_obj
+
     @property
     def symbolized(self):
-        return self.data.pipe(self.renameFunc).rename(NAME_KEYS, axis=1)
+        return self.data.pipe(self.renameFunc, names=self.col_names).rename(NAME_KEYS, axis=1)
         
-    def displayPairs(self, target_var, row_len=5):
+    def displayPairs(self, target_var, row_len=5, trend_line=False):
         data = self.symbolized
+        data = data.copy()
+        data['Tube type'] = data['Tube type'].str.rstrip(" h").str.rstrip(" dp")
         xcols = set(data.columns) - set([NAME_KEYS[target_var]]) - set(['Tube type'])
         ycols = set([NAME_KEYS[target_var]])
 
         # In each iteration, only draw pairplot for row_len variables from xcols
 
         for i in range(0, len(xcols), row_len):
-            sns.pairplot(data, x_vars=list(xcols)[i:i+row_len], y_vars=ycols, hue='Tube type')
-            plt.show()
+            if not trend_line:
+                sns.pairplot(data, x_vars=list(xcols)[i:i+row_len], y_vars=ycols, hue='Tube type')
+            # Add hue labels
+            else:
+                sns.PairGrid(data, x_vars=list(xcols)[i:i+row_len], y_vars=ycols, hue='Tube type') \
+                    .map(sns.regplot, scatter_kws={'alpha': 0.5}, ).add_legend()
+                plt.show()
 
-    def displayHistogram(self, target_var):
+    def displayHistogram(self, target_var, target_unit=''):
+        adjusted_unit = (f" $({target_unit})$" if target_unit else '')
         data = self.symbolized
+        data = data.copy()
+        data['Tube type'] = data['Tube type'].str.rstrip(" h").str.rstrip(" dp")
+        new_col_name = f"{NAME_KEYS[target_var]} {adjusted_unit}"
+        data = data.rename({NAME_KEYS[target_var]: new_col_name}, axis=1)
 
-        sns.displot(data, x=NAME_KEYS[target_var], hue='Tube type', kind='kde', fill=True)
+        sns.displot(data, x=new_col_name, hue='Tube type', kind='kde', fill=True)
 
     def defineCats(self):
         self.sample_category = self.data['dataset'] + " c:" + pd.Series(self.clusters, index=self.data.index).astype(str)
@@ -398,6 +444,38 @@ class Dataset:
                 dkt[k] = v._score_func(self.y_test, self.y_pred[name], **v._kwargs)
         return pd.DataFrame(self.scores)
     
+    def displayAllModelTestResultsGrp(self, scoring=None, groupby='dataset'):
+        scoring = scoring or self.scoring
+        if self.scores is None:
+            self.scores = {}
+        for name in self.models.keys():
+            for k, v in scoring.items():
+                frame = pd.DataFrame({'Pred': self.y_pred[name], 'True': self.y_test, 'dataset': self.data_test['dataset']})
+                frame_g = frame.groupby(groupby).apply(lambda x: v._score_func(x['True'], x['Pred'], **v._kwargs))
+                dkt = self.scores.setdefault(name, {})
+                dkt[k] = frame_g
+        k, v = list(zip(*list(self.scores.items())))
+        return pd.concat([pd.DataFrame(vv).T for vv in v], keys=k, axis=1)
+
+    def visualizeGroupsInDecomposition(self):
+        fig = plt.figure(figsize=(12, 8))
+        f1 = self.data['dataset'] == 'Plain tube h'
+        f2 = self.data['dataset'] == 'Microfin tube h'
+        ax = fig.add_subplot()
+        ax.scatter(self.Xdec[f1, 0], self.Xdec[f1, 1], color='red', label='Plain Tube', marker='^', edgecolors='black')
+        ax.scatter(self.Xdec[f2, 0], self.Xdec[f2, 1], color='blue', label='Finned Tube', marker='o', edgecolors='black')
+        # ax.scatter(self.Xdec[:, 0], self.Xdec[:, 1], c=self.clusters, cmap='viridis', linewidth=0.5, edgecolors='black')
+        ax.set_xlabel('$PC_1$')
+        ax.set_ylabel('$PC_2$')
+        # add legend
+        duz_boru = mlines.Line2D([], [], color='red', marker='^', linestyle='None',
+                                    markersize=10, label='Plain Tube', )
+        mikrokanatli_boru = mlines.Line2D([], [], color='blue', marker='o', linestyle='None',
+                                    markersize=10, label='Finned Tube', )
+        ax.legend(handles=[duz_boru, mikrokanatli_boru]);        # plt.title("Clusters based on principal components")
+        # plt.grid()
+        plt.show()
+
     def visualizeClusters(self, fil1='Plain tube h', fil2='Microfin tube h'):
         f1 = self.data['dataset'] == fil1
         f2 = self.data['dataset'] == fil2
@@ -479,7 +557,7 @@ class Dataset:
         stats['Comparison', 'p-value'] = pvals
         return stats
 
-    def plot_predictions(self, target_label='h_{TP}', figure_kwargs=None, model_keys=None):
+    def plot_predictions(self, target_label='h_{TP}', figure_kwargs=None, model_keys=None, axis_unit='', grid=True, model_keys_rename=None):
 
         
         data_h = self.data
@@ -492,6 +570,8 @@ class Dataset:
         for name, pred in [model_item for model_item in self.y_pred.items() if model_item[0] in model_keys]:
             ypreds.append(pred)
             model_names.append(name)
+        if model_keys_rename is None:
+            model_keys_rename = model_names
 
         dataset_types = data_h['dataset'].unique()
         num_datasets = len(dataset_types)
@@ -506,7 +586,8 @@ class Dataset:
         
         fig, axs = plt.subplots(nrows=num_datasets, ncols=len(ypreds), **figure_kwargs)
         colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-        markers = ['o', 's', 'D', 'v', '^', 'p', '*', 'h']       
+        markers = ['o', 's', 'D', 'v', '^', 'p', '*', 'h']
+        adjusted_axis_unit = (f" $({axis_unit})$" if axis_unit else '')
         for row, dataset_type in enumerate(dataset_types):
             f = data_test['dataset'] == dataset_type
             
@@ -517,8 +598,8 @@ class Dataset:
                 ylims = tuple(axs[row, col].get_ylim())
 
                 ori = y_test[f].iloc[0]
-
-                axs[row, col].grid()
+                if grid:
+                    axs[row, col].grid()
                 axs[row, col].axline((ori, ori), slope=1, label='x=y')
                 axs[row, col].axline((ori, ori*1.1), slope=1.1, color='black', linestyle=':', label="+-10%")
                 axs[row, col].axline((ori, ori*1.3), slope=1.3, color='gray', linestyle='--', label="+-30%")
@@ -526,12 +607,12 @@ class Dataset:
                 axs[row, col].axline((ori, ori*0.7), slope=0.7, color='gray', linestyle='--')
                 if col == 0:
                     axs[row, col].legend()
-                    axs[row, col].set_ylabel(f"$\hat{{{target_label}}}$")
-                axs[row, col].set_xlabel(f"${target_label}$")
+                    axs[row, col].set_ylabel(f"$\hat{{{target_label}}}$" + adjusted_axis_unit)
+                axs[row, col].set_xlabel(f"${target_label}$" + adjusted_axis_unit)
                 axs[row, col].set_xlim(xlims)
                 axs[row, col].set_ylim(ylims)
                 # axs[row, col].axis("equal")
-                axs[row, col].set_title(f"{model_names[col]} - {dataset_type}")  # Set model name as title
+                axs[row, col].set_title(f"{model_keys_rename[col]} - {dataset_type}")  # Set model name as title
         
             # fig.suptitle(f"Dataset Type: {dataset_type}", fontsize=16, y=0.92)
         
@@ -642,8 +723,8 @@ class OutlierDataset(Dataset):
         plt.figure(figsize=(12, 6))
         plt.scatter(*self.h_cluster_pipeline[:1].transform(self.X_train)[:, :2].T, label='Training samples')
         plt.scatter(*self.h_cluster_pipeline[:1].transform(self.X_test)[:, :2].T, color='red', label='Extrapolation samples')
-        plt.xlabel("$PCA_1$")
-        plt.ylabel("$PCA_2$")
+        plt.xlabel("$PC_1$")
+        plt.ylabel("$PC_2$")
         plt.grid()
         plt.legend()
         plt.title("Input variables in PCA space");
@@ -653,11 +734,19 @@ class OutlierDataset(Dataset):
 def getRaw(x):
     return x[cfg.INPUT_RAW_LAYER_NAME]
 
-def getANN(cv=None):
+
+def getProcessed(x):
+    return x[cfg.INPUT_CALCULATED_LAYER_NAME]
+
+def getANN(cv=None, subselector_fn: Callable = None):
     olcekli_ann = compose.TransformedTargetRegressor(
         regressor=neural_network.MLPRegressor(hidden_layer_sizes=(40, 10), max_iter=4000, random_state=42),
         transformer=preprocessing.StandardScaler()
     )
+
+    if subselector_fn is None:
+        subselector_fn = getRaw
+        
 
     union = pipeline.FeatureUnion([
         ("log", preprocessing.FunctionTransformer(func=np.log1p, inverse_func=np.expm1))
@@ -668,7 +757,7 @@ def getANN(cv=None):
 
 
     pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(getRaw)),
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ("rescale", preprocessing.StandardScaler()),
         ('mlp', olcekli_ann)
@@ -704,7 +793,11 @@ def getANN(cv=None):
     return gs
 
 
-def getANNRandomSearch(cv=None):
+def getANNRandomSearch(cv=None, subselector_fn: Callable = None):
+
+    if subselector_fn is None:
+        subselector_fn = getRaw
+
     olcekli_ann = compose.TransformedTargetRegressor(
         regressor=neural_network.MLPRegressor(max_iter=4000, random_state=42),
         transformer=preprocessing.StandardScaler()
@@ -719,7 +812,7 @@ def getANNRandomSearch(cv=None):
 
 
     pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(getRaw)),
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ("rescale", preprocessing.StandardScaler()),
         ('mlp', olcekli_ann)
@@ -759,7 +852,9 @@ def getANNRandomSearch(cv=None):
 def identity(x):
     return x
 
-def getLwr(cv=None):
+def getLwr(cv=None, subselector_fn: Callable = None):
+    if subselector_fn is None:
+        subselector_fn = getRaw
     ctlocal = compose.TransformedTargetRegressor(regressor=LocallyWeightedRegressor(n_neighbors=15, gamma=.1), 
                                                 # func=np.log1p, 
                                                 func=identity, 
@@ -774,7 +869,7 @@ def getLwr(cv=None):
     if cv is None:
         cv = model_selection.KFold(n_splits=3, shuffle=True, random_state=42)
     local_pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(getRaw)),
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         # ("comp", comp),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
@@ -792,15 +887,19 @@ def getLwr(cv=None):
     scoring=scoring,
     refit='R2',
     cv=cv,
-    n_jobs=-1,
+    n_jobs=1,
+    error_score='raise',
 )
     return local_pipe_gs
 
-def getGBM(cv=None):
+def getGBM(cv=None, subselector_fn: Callable = None):
+    if subselector_fn is None:
+        subselector_fn = getRaw
     union = pipeline.FeatureUnion([
         ("log", preprocessing.FunctionTransformer(func=np.log1p, inverse_func=np.expm1))
     ])
     lgbm_pipe = pipeline.Pipeline([
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
         ("rescale", preprocessing.StandardScaler()),
@@ -823,11 +922,14 @@ def getGBM(cv=None):
     )
     return lgbm_pipe_gs
 
-def getGBMFocused(cv=None):
+def getGBMFocused(cv=None, subselector_fn: Callable = None):
+    if subselector_fn is None:
+        subselector_fn = getRaw
     union = pipeline.FeatureUnion([
         ("log", preprocessing.FunctionTransformer(func=np.log1p, inverse_func=np.expm1))
     ])
     lgbm_pipe = pipeline.Pipeline([
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
         ("rescale", preprocessing.StandardScaler()),
@@ -854,7 +956,9 @@ def getGBMFocused(cv=None):
     return lgbm_pipe_gs
 
 
-def getLwrExtendedNeighbors(cv=None):
+def getLwrExtendedNeighbors(cv=None, subselector_fn: Callable = None):
+    if subselector_fn is None:
+        subselector_fn = getRaw
     ctlocal = compose.TransformedTargetRegressor(regressor=LocallyWeightedRegressor(n_neighbors=15, gamma=.1), 
                                                 # func=np.log1p, 
                                                 func=identity, 
@@ -869,7 +973,7 @@ def getLwrExtendedNeighbors(cv=None):
     if cv is None:
         cv = model_selection.KFold(n_splits=3, shuffle=True, random_state=42)
     local_pipe = pipeline.Pipeline([
-        ("subselect", preprocessing.FunctionTransformer(getRaw)),
+        ("subselect", preprocessing.FunctionTransformer(subselector_fn)),
         # ("comp", comp),
         ('imputer', impute.SimpleImputer(strategy='mean')),
         ('ink', union),
@@ -888,7 +992,7 @@ def getLwrExtendedNeighbors(cv=None):
     refit='R2',
     cv=cv,
     n_jobs=-1,
-)
+    )
     return local_pipe_gs
 
 def getDummy(cv=None):
@@ -953,3 +1057,11 @@ def compareDatasetDists(d1, d2, keys):
     d2_dist = d2.displayTrainTestDistStats()
     stat = ("Comparison", "p-value")
     return pd.concat([d1_dist[stat], d2_dist[stat]], axis=1, keys=keys)
+
+
+@dataclasses.dataclass
+class ModelConfig:
+    model_name: str
+    model_feature_subset: Callable
+    model_getter: Callable
+    cv_config: model_selection.BaseCrossValidator = None
